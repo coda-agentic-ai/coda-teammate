@@ -1,0 +1,43 @@
+version: "3.9"
+services:
+  # LAYER 1 & 2: The Brain & API
+  liaison:
+    build: 
+      context: .
+      dockerfile: apps/liaison_brain/Dockerfile
+    ports: ["8000:8000"]
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    networks: [teammate_net]
+
+  # LAYER 3 & 4: (Built into the libraries loaded by Liaison)
+  # But represented here as the UI for interaction
+  ui:
+    build:
+      context: .
+      dockerfile: apps/workspace_ui/Dockerfile
+    ports: ["8501:8501"]
+    networks: [teammate_net]
+
+  # INFRASTRUCTURE: The "Resume-ability" Layer
+  db:
+    image: postgres:16-alpine
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_DB: teammate_memory
+    networks: [teammate_net]
+
+  redis:
+    image: redis:7-alpine # Used for real-time task queueing
+    networks: [teammate_net]
+
+networks:
+  teammate_net:
+    driver: bridge

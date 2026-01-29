@@ -1,1 +1,1 @@
-# coda-teammate
+# coda-teammate-suite

@@ -1,0 +1,37 @@
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[manifest]
+members = [
+    "coda-liaison-brain",
+    "coda-sentry-foundation",
+    "coda-skillhive",
+    "coda-teammate-suite",
+    "coda-workspace-ui",
+]
+
+[[package]]
+name = "coda-liaison-brain"
+version = "0.1.0"
+source = { virtual = "apps/liaison_brain" }
+
+[[package]]
+name = "coda-sentry-foundation"
+version = "0.1.0"
+source = { virtual = "packages/sentry_foundation" }
+
+[[package]]
+name = "coda-skillhive"
+version = "0.1.0"
+source = { virtual = "packages/skillhive" }
+
+[[package]]
+name = "coda-teammate-suite"
+version = "0.1.0"
+source = { virtual = "." }
+
+[[package]]
+name = "coda-workspace-ui"
+version = "0.1.0"
+source = { virtual = "apps/workspace_ui" }
