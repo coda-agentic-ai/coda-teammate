@@ -2,7 +2,7 @@ version: "3.9"
 services:
   # LAYER 1 & 2: The Brain & API
   liaison:
-    build: 
+    build:
       context: .
       dockerfile: apps/liaison_brain/Dockerfile
     ports: ["8000:8000"]
@@ -11,6 +11,12 @@ services:
       db: { condition: service_healthy }
       redis: { condition: service_started }
     networks: [teammate_net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # LAYER 3 & 4: (Built into the libraries loaded by Liaison)
   # But represented here as the UI for interaction
@@ -18,20 +24,30 @@ services:
     build:
       context: .
       dockerfile: apps/workspace_ui/Dockerfile
-    ports: ["8501:8501"]
+    ports: ["8501:5001"]
+    environment:
+      - BRAIN_URL=http://liaison:8000
     networks: [teammate_net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8501 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # INFRASTRUCTURE: The "Resume-ability" Layer
   db:
     image: postgres:16-alpine
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
     environment:
-      POSTGRES_USER: user
-      POSTGRES_DB: teammate_memory
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: ["5432:5432"]
     networks: [teammate_net]
 
   redis:
