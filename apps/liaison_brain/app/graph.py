@@ -13,6 +13,8 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from .memory import get_async_saver, get_sync_saver, close_async_saver
 from .state import TeammateState, TeammateStateModel
+import asyncio
+import threading
 
 
 # === Settings for LLM Configuration ===
@@ -203,15 +205,20 @@ async def get_llm_with_tools() -> Any:
             "openai": settings.OPENAI_API_KEY,
         }
         api_key = provider_api_keys.get(provider, "")
+        print(f"get_llm_with_tools: provider={provider}, api_key present={bool(api_key)}")
 
         if not api_key:
             raise ValueError(f"API key not found for provider: {provider}")
 
         # Create LLM and bind MCP tools
+        print(f"get_llm_with_tools: creating LLM for provider {provider}")
         llm = create_llm(provider, api_key)
+        print(f"get_llm_with_tools: LLM created, type: {type(llm).__name__}")
         mcp_tools, _ = await get_mcp_tools()  # Unpack tuple, ignore session
+        print(f"get_llm_with_tools: loaded {len(mcp_tools)} MCP tools")
         _bound_mcp_tools = mcp_tools  # Store tools separately
         _llm_with_tools = llm.bind_tools(mcp_tools)
+        print(f"get_llm_with_tools: LLM bound with tools")
 
     return _llm_with_tools
 
@@ -255,7 +262,9 @@ async def liaison_node(state: TeammateState) -> TeammateState:
     Analyzes the task and routes to appropriate next steps.
     Invokes the LLM with bound MCP tools to handle user requests.
     """
+    import traceback
     messages = state.get("messages", [])
+    print(f"liaison_node: messages count = {len(messages)}")
 
     if not messages:
         return {
@@ -265,6 +274,7 @@ async def liaison_node(state: TeammateState) -> TeammateState:
 
     # Get LLM with tools bound (initializes the LLM and MCP tools)
     llm = await get_llm_with_tools()
+    print(f"liaison_node: LLM obtained, type: {type(llm).__name__}")
 
     # Convert any string messages to HumanMessage objects
     formatted_messages = []
@@ -277,7 +287,19 @@ async def liaison_node(state: TeammateState) -> TeammateState:
             formatted_messages.append(msg)
 
     # Invoke the LLM with the FULL message history (including tool calls/results)
-    response = await llm.ainvoke(formatted_messages)
+    print(f"liaison_node: invoking LLM with {len(formatted_messages)} messages")
+    try:
+        response = await llm.ainvoke(formatted_messages)
+    except Exception as e:
+        print(f"liaison_node: LLM invocation failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        # Return error message as AIMessage instead of crashing
+        error_msg = f"Error processing request: {str(e)}"
+        response = AIMessage(content=error_msg)
+
+    print(f"liaison_node: response type: {type(response).__name__}")
+    if hasattr(response, 'content'):
+        print(f"liaison_node: response content: {response.content[:200] if response.content else 'empty'}")
 
     # Add the response to messages
     updated_messages = messages + [response]
@@ -465,7 +487,7 @@ def should_continue(state: TeammateState) -> Literal["research_node", "execute_n
     return "budget_check_node"
 
 
-def should_budget_check(state: TeammateState) -> Literal["research_node", "execute_node", "approval_node", "tools_node", "human_intervention"]:
+def should_budget_check(state: TeammateState) -> Literal["liaison_node", "research_node", "execute_node", "approval_node", "tools_node", "human_intervention"]:
     """Routing logic after budget check.
 
     If budget exceeded, route to human_intervention for approval.
@@ -478,6 +500,7 @@ def should_budget_check(state: TeammateState) -> Literal["research_node", "execu
 
     # Check if there are pending tool calls to execute
     messages = state.get("messages", [])
+    print(f"[DEBUG] should_budget_check: len(messages)={len(messages)}")
     if messages:
         last_message = messages[-1]
         # Check if last message has tool_calls
@@ -485,12 +508,24 @@ def should_budget_check(state: TeammateState) -> Literal["research_node", "execu
                      getattr(last_message, "additional_kwargs", {}).get("tool_calls", [])
         if tool_calls:
             return "tools_node"
+    else:
+        last_message = None
 
     # Budget check for high-value tasks
     if state.get("task_budget", 0) > 5000:
         return "research_node"
 
-    return "execute_node"
+    # If we have at least one AI response and no tool calls, execute to end
+    if len(messages) >= 2 and last_message and isinstance(last_message, AIMessage):
+        print(f"[DEBUG] should_budget_check: routing to execute_node, AI response present")
+        return "execute_node"
+
+    # If we have more than 4 messages, assume task is complete
+    if len(messages) > 4:
+        print(f"[DEBUG] should_budget_check: routing to execute_node, len={len(messages)}")
+        return "execute_node"
+
+    return "liaison_node"  # Continue normal flow
 
 
 def should_approve(state: TeammateState) -> Literal["liaison_node", "execute_node", "end"]:
@@ -535,6 +570,7 @@ def create_graph(checkpointer: AsyncPostgresSaver) -> Any:
         "budget_check_node",
         should_budget_check,
         {
+            "liaison_node": "liaison_node",
             "research_node": "research_node",
             "execute_node": "execute_node",
             "approval_node": "approval_node",
@@ -565,6 +601,8 @@ def create_graph(checkpointer: AsyncPostgresSaver) -> Any:
 
 _graph: Any | None = None
 _checkpointer: Any | None = None
+_graph_lock = asyncio.Lock()
+_graph_sync_lock = threading.Lock()
 
 
 async def get_graph() -> Any:
@@ -575,9 +613,12 @@ async def get_graph() -> Any:
     """
     global _graph, _checkpointer
     if _graph is None:
-        # Create checkpointer without context manager (keeps connection alive)
-        _checkpointer = await get_async_saver()
-        _graph = create_graph(_checkpointer)
+        async with _graph_lock:
+            # Double-check after acquiring lock
+            if _graph is None:
+                # Create checkpointer without context manager (keeps connection alive)
+                _checkpointer = await get_async_saver()
+                _graph = create_graph(_checkpointer)
     return _graph
 
 
@@ -585,15 +626,20 @@ def get_graph_sync() -> Any:
     """Synchronous graph accessor (for testing)."""
     global _graph, _checkpointer
     if _graph is None:
-        # Create checkpointer without context manager (keeps connection alive)
-        _checkpointer = get_sync_saver()
-        _graph = create_graph(_checkpointer)
+        with _graph_sync_lock:
+            # Double-check after acquiring lock
+            if _graph is None:
+                # Create checkpointer without context manager (keeps connection alive)
+                _checkpointer = get_sync_saver()
+                _graph = create_graph(_checkpointer)
     return _graph
 
 
 async def close_graph() -> None:
     """Close the graph and checkpointer connection gracefully."""
     global _graph, _checkpointer
-    await close_async_saver(_checkpointer)
-    _checkpointer = None
-    _graph = None
+    async with _graph_lock:
+        if _checkpointer is not None:
+            await close_async_saver(_checkpointer)
+        _checkpointer = None
+        _graph = None

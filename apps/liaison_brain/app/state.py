@@ -1,5 +1,6 @@
 """TeammateState definitions for LangGraph state machine."""
 
+from typing import Any
 from typing_extensions import TypedDict
 
 from pydantic import BaseModel, Field
@@ -11,7 +12,7 @@ class TeammateState(TypedDict):
     task_id: str
     task_description: str
     task_budget: int
-    messages: list[str]
+    messages: list[Any]
     current_context: str
     current_step: str
     sub_agents_spawned: list[str]
@@ -32,7 +33,7 @@ class TeammateStateModel(BaseModel):
     task_id: str = Field(..., description="Unique identifier for the task")
     task_description: str = Field(..., description="Human-readable task description")
     task_budget: int = Field(default=1000, description="Token budget for the task")
-    messages: list[str] = Field(default_factory=list, description="Conversation history")
+    messages: list[Any] = Field(default_factory=list, description="Conversation history")
     current_context: str = Field(default="", description="Current working context")
     current_step: str = Field(default="init", description="Current graph node")
     sub_agents_spawned: list[str] = Field(default_factory=list, description="Spawned sub-agents")

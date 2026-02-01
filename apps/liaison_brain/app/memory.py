@@ -12,6 +12,48 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import connect as sync_connect
 from psycopg import sql
 from psycopg.rows import dict_row
+import asyncio
+
+
+# Module-level lock for serializing ALL database operations
+# This prevents concurrent access issues with PostgreSQL connections
+_DB_LOCK = asyncio.Lock()
+
+
+class SerializedAsyncPostgresSaver(AsyncPostgresSaver):
+    """AsyncPostgresSaver with serialized access using a module-level lock."""
+    async def aget_tuple(self, *args, **kwargs):
+        async with _DB_LOCK:
+            return await super().aget_tuple(*args, **kwargs)
+
+    async def aset_tuple(self, *args, **kwargs):
+        async with _DB_LOCK:
+            return await super().aset_tuple(*args, **kwargs)
+
+    async def aget_state(self, *args, **kwargs):
+        async with _DB_LOCK:
+            return await super().aget_state(*args, **kwargs)
+
+    async def aset_state(self, *args, **kwargs):
+        async with _DB_LOCK:
+            return await super().aset_state(*args, **kwargs)
+
+    async def alist(self, *args, **kwargs):
+        async with _DB_LOCK:
+            return await super().alist(*args, **kwargs)
+
+    async def adelete(self, *args, **kwargs):
+        async with _DB_LOCK:
+            return await super().adelete(*args, **kwargs)
+
+    async def asetup(self, *args, **kwargs):
+        async with _DB_LOCK:
+            return await super().asetup(*args, **kwargs)
+
+    async def aclose(self, *args, **kwargs):
+        async with _DB_LOCK:
+            return await super().aclose(*args, **kwargs)
+
 
 # Load .env from project root (for local dev) or skip if not found (Docker injects via env_file)
 _dotenv_path = Path(__file__).resolve().parents[2] / ".env"
@@ -54,13 +96,29 @@ async def get_async_saver() -> AsyncPostgresSaver:
     Creates a persistent connection that won't close until explicitly closed.
     Use close_async_saver() to cleanup when done.
     """
+    import traceback
+    print(f"[DEBUG] get_async_saver called from {traceback.extract_stack()[-2].name}")
     from psycopg import AsyncConnection
+    import asyncio
 
-    # Create connection and keep it open
-    conn = await AsyncConnection.connect(
-        DATABASE_URL, autocommit=True, prepare_threshold=0
-    )
-    return AsyncPostgresSaver(conn=conn, serde=None)
+    max_retries = 3
+    base_delay = 1.0  # seconds
+
+    for attempt in range(max_retries):
+        try:
+            # Create connection and keep it open
+            conn = await AsyncConnection.connect(
+                DATABASE_URL, autocommit=True
+            )
+            print(f"Database connection established (attempt {attempt + 1}/{max_retries})")
+            return SerializedAsyncPostgresSaver(conn=conn, serde=None)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                print(f"Failed to connect to database after {max_retries} attempts: {e}")
+                raise
+            delay = base_delay * (2 ** attempt)  # Exponential backoff
+            print(f"Database connection failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay:.1f}s...")
+            await asyncio.sleep(delay)
 
 
 def get_sync_saver() -> PostgresSaver:
@@ -69,8 +127,23 @@ def get_sync_saver() -> PostgresSaver:
     Creates a persistent connection that won't close until explicitly closed.
     Use close_sync_saver() to cleanup when done.
     """
-    conn = sync_connect(DATABASE_URL, autocommit=True)
-    return PostgresSaver(conn=conn)
+    import time
+
+    max_retries = 3
+    base_delay = 1.0  # seconds
+
+    for attempt in range(max_retries):
+        try:
+            conn = sync_connect(DATABASE_URL, autocommit=True)
+            print(f"Sync database connection established (attempt {attempt + 1}/{max_retries})")
+            return PostgresSaver(conn=conn)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                print(f"Failed to connect to database synchronously after {max_retries} attempts: {e}")
+                raise
+            delay = base_delay * (2 ** attempt)  # Exponential backoff
+            print(f"Sync database connection failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay:.1f}s...")
+            time.sleep(delay)
 
 
 async def close_async_saver(saver: AsyncPostgresSaver) -> None:

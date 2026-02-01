@@ -17,6 +17,26 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    develop:
+      watch:
+        - action: sync
+          path: apps/liaison_brain/
+          target: /app/
+          ignore:
+            - __pycache__/
+            - "*.pyc"
+        - action: sync
+          path: packages/skillhive/
+          target: /packages/skillhive/
+          ignore:
+            - __pycache__/
+            - "*.pyc"
+        - action: sync
+          path: packages/sentry_foundation/
+          target: /packages/sentry_foundation/
+          ignore:
+            - __pycache__/
+            - "*.pyc"
 
   # LAYER 3 & 4: (Built into the libraries loaded by Liaison)
   # But represented here as the UI for interaction
@@ -27,6 +47,7 @@ services:
     ports: ["8501:5001"]
     environment:
       - BRAIN_URL=http://liaison:8000
+      - DOCKER=true
     networks: [teammate_net]
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8501 || exit 1"]
@@ -34,6 +55,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    develop:
+      watch:
+        - action: sync
+          path: apps/workspace_ui/
+          target: /app/
+          ignore:
+            - __pycache__/
+            - "*.pyc"
 
   # INFRASTRUCTURE: The "Resume-ability" Layer
   db:
