@@ -297,14 +297,42 @@ async def chat_input(input_data: ChatInput):
         graph = await get_graph()
         config = {"configurable": {"thread_id": thread_id}}
 
-        # Create initial state
-        initial_state = await generate_state(
-            thread_id=thread_id,
-            message=input_data.message,
-            task_description=input_data.task_description,
-            task_budget=input_data.task_budget,
-            cost_limit=input_data.cost_limit,
-        )
+        # Check if state already exists for this thread (conversational memory)
+        existing_state = await graph.aget_state(config)
+
+        if existing_state:
+            # Append new message to existing conversation history
+            existing_messages = existing_state.values.get("messages", [])
+            new_messages = list(existing_messages) + [HumanMessage(content=input_data.message)]
+
+            # Create state update preserving existing state
+            initial_state = {
+                "task_id": thread_id,
+                "task_description": input_data.task_description or existing_state.values.get("task_description", input_data.message[:100]),
+                "task_budget": input_data.task_budget,
+                "messages": new_messages,  # Include history!
+                "current_context": existing_state.values.get("current_context", ""),
+                "current_step": "liaison",  # Continue from liaison node
+                "sub_agents_spawned": existing_state.values.get("sub_agents_spawned", []),
+                "requires_approval": False,
+                "approval_granted": False,
+                "total_cost": existing_state.values.get("total_cost", 0.0),
+                "cost_limit": input_data.cost_limit,
+                "cost_history": existing_state.values.get("cost_history", []),
+                "privacy_violation": False,
+                "intervention_reason": "",
+            }
+            print(f"[chat_input] Continuing existing conversation, messages: {len(new_messages)}")
+        else:
+            # Create fresh state for new conversation
+            initial_state = await generate_state(
+                thread_id=thread_id,
+                message=input_data.message,
+                task_description=input_data.task_description,
+                task_budget=input_data.task_budget,
+                cost_limit=input_data.cost_limit,
+            )
+            print("[chat_input] Starting new conversation")
 
         # Validate state
         state_model = TeammateStateModel(**initial_state)

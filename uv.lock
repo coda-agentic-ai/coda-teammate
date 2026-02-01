@@ -446,7 +446,6 @@ name = "coda-liaison-brain"
 version = "0.1.0"
 source = { virtual = "apps/liaison_brain" }
 dependencies = [
-    { name = "coda-skillhive" },
     { name = "fastapi" },
     { name = "langchain-anthropic" },
     { name = "langchain-community" },
@@ -466,7 +465,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "coda-skillhive", editable = "packages/skillhive" },
     { name = "fastapi", specifier = ">=0.109.0" },
     { name = "langchain-anthropic", specifier = ">=1.3.1" },
     { name = "langchain-community", specifier = ">=0.3.0" },
@@ -498,7 +496,7 @@ requires-dist = [{ name = "litellm", specifier = ">=1.0.0" }]
 [[package]]
 name = "coda-skillhive"
 version = "0.1.0"
-source = { editable = "packages/skillhive" }
+source = { virtual = "packages/skillhive" }
 dependencies = [
     { name = "fastmcp" },
 ]
