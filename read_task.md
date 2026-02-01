@@ -14,3 +14,5 @@ Suggestion for reference:
 HTMX form submissions naturally wait for a server response to update the DOM, creating a synchronous feel. To prevent the UI from appearing frozen during long backend processes, use the hx-indicator attribute to show loading spinners and htmx.config.defaultSwapStyle to manage content replacement, ensuring a responsive user experience. 
 
 
+update CLAUDE.md
+always add log when add code

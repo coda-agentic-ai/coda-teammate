@@ -3,7 +3,7 @@
 ## 1. Project Architecture
 This is a 2026-standard **Agentic Enterprise Monorepo** managed by `uv`.
 - **Liaison Brain (`apps/liaison_brain`)**: FastAPI + LangGraph state machine. The "Mind."
-- **Workspace UI (`apps/workspace_ui`)**: Streamlit/FastHTML interface. The "Desk."
+- **Workspace UI (`apps/workspace_ui`)**: FastHTML + HTMX interface. The "Desk."
 - **SkillHive (`packages/skillhive`)**: MCP Tool registry and Specialist configs. The "Talent."
 - **Sentry Foundation (`packages/sentry_foundation`)**: Security, PII, and Budgeting. The "Shield."
 
@@ -17,13 +17,18 @@ This is a 2026-standard **Agentic Enterprise Monorepo** managed by `uv`.
 ### Critical Commands
 - **Install All**: `uv sync`
 - **Run Brain**: `uv run -m apps.liaison_brain.app.main`
-- **Run UI**: `uv run streamlit run apps/workspace_ui/app.py`
+- **Run UI**: `uv run python apps/workspace_ui/app.py`
 - **Lint**: `uv run ruff check . --fix`
 - **Type Check**: `uv run pyright`
 - **Add Dependency**: `uv add <package>` (Use `-p <package_name>` for specific workspace members)
 
 ## 3. Coding Guidelines
 - **Python Style**: Follow PEP 8 with 2026 modernisms (Strict typing, Pydantic v2).
+- **UI Framework**: ALWAYS use **FastHTML + HTMX** for the Workspace UI. Never use Streamlit.
+  - Use `from fasthtml.common import *` for imports
+  - Use HTMX attributes (`hx-post`, `hx-target`, `hx-ext="sse"`) for reactivity
+  - **SSE**: Handles the "Teammate's Voice" (stream of thoughts, reasoning chunks)
+  - **WebSockets**: Handle the "Canvas" (shared document state, collaborative updates)
 - **State Management**: All agent state must reside in `TeammateState` (TypedDict) within LangGraph. Never use global variables for agent memory.
 - **Error Handling**: Use the `Sentry Foundation` to wrap all external LLM and Tool calls for PII scrubbing and cost tracking.
 - **Tools**: New tools must be defined as **MCP Servers** in `packages/skillhive/mcp/` or as LangChain `@tool` decorated functions with clear Docstrings.
@@ -57,7 +62,7 @@ teammate-suite/
 │   │   └── pyproject.toml   # Deps: langgraph, fastapi, deepagents
 │   │
 │   └── workspace_ui/        # THE "DESK" (Collaborative UI)
-│       ├── app.py           # Streamlit or FastHTML (Python-native interface)
+│       ├── app.py           # FastHTML + HTMX (Python-native interface)
 │       └── components/      # UI components for "Human-in-the-loop" approval
 │
 ├── packages/
