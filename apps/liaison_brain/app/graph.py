@@ -9,10 +9,11 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from pydantic_settings import BaseSettings
 from pydantic import SecretStr
 from langchain_core.callbacks.base import BaseCallbackHandler
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from .memory import get_async_saver, get_sync_saver, close_async_saver
 from .state import TeammateState, TeammateStateModel
+from skillhive.persona import SYSTEM_PERSONA
 import asyncio
 import threading
 
@@ -286,10 +287,13 @@ async def liaison_node(state: TeammateState) -> TeammateState:
         else:
             formatted_messages.append(msg)
 
+    # Add SystemMessage as the first message for persona behavior
+    all_messages = [SystemMessage(content=SYSTEM_PERSONA)] + formatted_messages
+
     # Invoke the LLM with the FULL message history (including tool calls/results)
-    print(f"liaison_node: invoking LLM with {len(formatted_messages)} messages")
+    print(f"liaison_node: invoking LLM with {len(all_messages)} messages")
     try:
-        response = await llm.ainvoke(formatted_messages)
+        response = await llm.ainvoke(all_messages)
     except Exception as e:
         print(f"liaison_node: LLM invocation failed: {type(e).__name__}: {e}")
         traceback.print_exc()
