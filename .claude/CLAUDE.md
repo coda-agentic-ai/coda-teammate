@@ -34,6 +34,17 @@ This is a 2026-standard **Agentic Enterprise Monorepo** managed by `uv`.
 - **Tools**: New tools must be defined as **MCP Servers** in `packages/skillhive/mcp/` or as LangChain `@tool` decorated functions with clear Docstrings.
 - **Memory**: Implement "Memory Sync" using the `PostgresSaver` checkpointer for session persistence.
 
+### 3.5 Logging Guidelines
+- **Add logs for all new code**: Use the project's logging pattern when adding new functions, nodes, or components
+- Log entry points, important decisions, and errors
+- Example pattern (from existing code):
+  ```python
+  import logging
+  logger = logging.getLogger(__name__)
+  logger.info("Entering function_name with params: %s", params)
+  ```
+- Critical operations should use `logger.error` or `logger.warning`
+
 ## 4. Teammate Specific Rules
 - **The "Liaison" Node**: This is the primary orchestrator. It must always check the `Task Budget` before spawning a sub-agent.
 - **Human-in-the-Loop**: Any action involving "Financial Approval" or "External Email" must trigger an `interrupt_before` in the LangGraph.
@@ -44,7 +55,7 @@ This is a 2026-standard **Agentic Enterprise Monorepo** managed by `uv`.
 - Edit Security Rules: `packages/sentry_foundation/src/sentry/guardrails/`
 - Edit Agent Skills: `packages/skillhive/src/skillhive/registry.py`
 
-## 6. Teammate Monorepo Blueprint
+## 6. Teammate Monorepo Blueprint (version 0.1.0)
 teammate-suite/
 ├── .python-version          # Python 3.12+
 ├── pyproject.toml           # UV Workspace: defines shared build logic & ruff rules
@@ -81,3 +92,22 @@ teammate-suite/
 │       └── pyproject.toml
 │
 └── docker-compose.yml       # Orchestrates the "Digital Office" services
+
+## 7. Documentation Maintenance
+- **Always update CLAUDE.md** after making main modifications to:
+  - New application modules or packages
+  - Changed directory structure
+  - New critical commands or workflows
+  - Modified architecture decisions
+- Keep the "Teammate Monorepo Blueprint" (Section 6) in sync with actual file structure
+- Update version numbers when releasing
+
+## 8. Git Status Reference
+Current branch: `release/v0.0.3`
+
+Recent commits:
+- `7cd0976 remember user's name`
+- `58bc318 can remember my name; know itself`
+- `bb6796c release/v0.0.2`
+- `a4233b0 version 0.0.1`
+- `f163bbb Fix Docker networking`
