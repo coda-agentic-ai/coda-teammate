@@ -12,6 +12,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import connect as sync_connect
 from psycopg import sql
 from psycopg.rows import dict_row
+from psycopg.errors import ProgrammingError, ConnectionFailure
 import asyncio
 
 
@@ -20,35 +21,110 @@ import asyncio
 _DB_LOCK = asyncio.Lock()
 
 
+def _is_retryable_error(e: Exception) -> bool:
+    """Check if the error is retryable (connection/command in progress)."""
+    error_str = str(e).lower()
+    msg = e.args[0] if e.args else ""
+    msg_lower = msg.lower() if isinstance(msg, str) else ""
+
+    retryable_patterns = [
+        "another command is already in progress",
+        "connection already closed",
+        "could not obtain",
+        "connection refused",
+        "server closed the connection",
+        "terminating connection",
+    ]
+
+    for pattern in retryable_patterns:
+        if pattern in error_str or pattern in msg_lower:
+            return True
+    return False
+
+
 class SerializedAsyncPostgresSaver(AsyncPostgresSaver):
-    """AsyncPostgresSaver with serialized access using a module-level lock."""
+    """AsyncPostgresSaver with serialized access using a module-level lock and retry logic."""
+
+    async def _with_retry(self, coro_factory, operation_name: str, max_retries: int = 3):
+        """Execute a coroutine with retry logic for transient errors.
+
+        Args:
+            coro_factory: A callable that returns a new coroutine (not an already-created one)
+            operation_name: Name for logging
+            max_retries: Maximum number of retry attempts
+        """
+        base_delay = 0.1
+
+        for attempt in range(max_retries):
+            try:
+                # Create fresh coroutine on each attempt
+                return await coro_factory()
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    print(f"[{operation_name}] Failed after {max_retries} attempts: {e}")
+                    raise
+                if _is_retryable_error(e):
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    print(f"[{operation_name}] Retry {attempt + 1}/{max_retries} after {delay:.2f}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+
     async def aget_tuple(self, *args, **kwargs):
         async with _DB_LOCK:
-            return await super().aget_tuple(*args, **kwargs)
+            parent = super()
+            return await self._with_retry(
+                lambda: parent.aget_tuple(*args, **kwargs),
+                "aget_tuple"
+            )
 
     async def aset_tuple(self, *args, **kwargs):
         async with _DB_LOCK:
-            return await super().aset_tuple(*args, **kwargs)
+            parent = super()
+            return await self._with_retry(
+                lambda: parent.aset_tuple(*args, **kwargs),
+                "aset_tuple"
+            )
 
     async def aget_state(self, *args, **kwargs):
         async with _DB_LOCK:
-            return await super().aget_state(*args, **kwargs)
+            parent = super()
+            return await self._with_retry(
+                lambda: parent.aget_state(*args, **kwargs),
+                "aget_state"
+            )
 
     async def aset_state(self, *args, **kwargs):
         async with _DB_LOCK:
-            return await super().aset_state(*args, **kwargs)
+            parent = super()
+            return await self._with_retry(
+                lambda: parent.aset_state(*args, **kwargs),
+                "aset_state"
+            )
 
     async def alist(self, *args, **kwargs):
         async with _DB_LOCK:
-            return await super().alist(*args, **kwargs)
+            parent = super()
+            return await self._with_retry(
+                lambda: parent.alist(*args, **kwargs),
+                "alist"
+            )
 
     async def adelete(self, *args, **kwargs):
         async with _DB_LOCK:
-            return await super().adelete(*args, **kwargs)
+            parent = super()
+            return await self._with_retry(
+                lambda: parent.adelete(*args, **kwargs),
+                "adelete"
+            )
 
     async def asetup(self, *args, **kwargs):
         async with _DB_LOCK:
-            return await super().asetup(*args, **kwargs)
+            parent = super()
+            return await self._with_retry(
+                lambda: parent.asetup(*args, **kwargs),
+                "asetup"
+            )
 
     async def aclose(self, *args, **kwargs):
         async with _DB_LOCK:
@@ -61,9 +137,8 @@ if _dotenv_path.exists():
     load_dotenv(_dotenv_path)
 
 # Read DATABASE_URL from environment (injected by docker-compose or .env)
+# Only required when NOT using memory checkpointer
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable not set")
 
 
 @contextmanager

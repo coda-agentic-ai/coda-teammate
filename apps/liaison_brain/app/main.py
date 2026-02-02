@@ -18,7 +18,9 @@ from .state import TeammateStateModel
 from .shield import (
     format_cost_event,
     format_intervene_event,
+    format_thought_event,
 )
+from .callbacks import get_thought_callback, remove_thought_callback
 from langchain_core.messages import HumanMessage, AIMessage
 
 
@@ -80,6 +82,35 @@ app.add_middleware(
 
 
 # === Helper Functions ===
+
+# Global lock to serialize all graph/checkpointer operations
+# This prevents PostgreSQL "command in progress" errors from concurrent access
+_GRAPH_LOCK = asyncio.Lock()
+
+
+async def graph_aget_state(graph, config):
+    """Thread-safe graph.aget_state with retry logic."""
+    async with _GRAPH_LOCK:
+        try:
+            return await graph.aget_state(config)
+        except Exception as e:
+            if "another command is already in progress" in str(e).lower():
+                await asyncio.sleep(0.1)
+                return await graph.aget_state(config)
+            raise
+
+
+async def graph_ainvoke(graph, state, config):
+    """Thread-safe graph.ainvoke with retry logic."""
+    async with _GRAPH_LOCK:
+        try:
+            return await graph.ainvoke(state, config)
+        except Exception as e:
+            if "another command is already in progress" in str(e).lower():
+                await asyncio.sleep(0.1)
+                return await graph.ainvoke(state, config)
+            raise
+
 
 def is_ai_message(msg) -> bool:
     """Check if message is an AI message (handles dict deserialization)."""
@@ -158,6 +189,7 @@ async def event_generator(
     last_message_count = 0
     last_ping_time = time.time()
     last_cost_time = time.time()
+    thought_callback = None
 
     # Wrap initialization in try/except to prevent crashes on graph/state errors
     try:
@@ -166,8 +198,8 @@ async def event_generator(
         config = {"configurable": {"thread_id": thread_id}}
         print(f"event_generator: thread_id={thread_id}, config={config}")
 
-        # Get current state to check for messages
-        current_state = await graph.aget_state(config)
+        # Get current state to check for messages (thread-safe)
+        current_state = await graph_aget_state(graph, config)
         if current_state:
             print(f"event_generator: state exists, values keys: {list(current_state.values.keys())}")
 
@@ -194,6 +226,8 @@ async def event_generator(
             total_cost = current_state.values.get("total_cost", 0.0)
             yield format_cost_event(total_cost)
 
+        # Thought callback will be fetched in the loop (handles timing issue)
+
     except Exception as e:
         print(f"event_generator: initialization error: {type(e).__name__}: {e}")
         traceback.print_exc()
@@ -203,11 +237,16 @@ async def event_generator(
     # Stream indefinitely, checking for new state
     while True:
         try:
-            # Get latest state
-            state = await graph.aget_state(config)
+            # Get latest state (thread-safe with retry logic)
+            state = await graph_aget_state(graph, config)
             if not state:
-                yield {"event": "error", "data": json.dumps({"message": "Thread not found"})}
-                break
+                # Thread not created yet - wait and retry instead of killing stream
+                print(f"[SSE] Thread {thread_id} not found yet, waiting for creation...")
+                await asyncio.sleep(0.5)
+                continue
+
+            # Thread found - log state exists
+            print(f"[SSE] Thread {thread_id} found, state exists")
 
             messages = state.values.get("messages", [])
             print(f"event_generator: messages count = {len(messages)}, last_message_count = {last_message_count}")
@@ -232,16 +271,23 @@ async def event_generator(
                     has_tool_id = has_tool_call_id(msg)
                     print(f"event_generator: message type: {type(msg).__name__}, is_ai: {is_ai}, has_tool_call_id: {has_tool_id}, content length: {len(content)}")
                     # Skip tool messages (have tool_call_id) and only show assistant responses
+                    # Also skip if thought callback exists (thought events will represent streaming content)
                     if content and not has_tool_id and is_ai:
-                        print("event_generator: yielding message event")
-                        yield {
-                            "event": "message",
-                            "data": json.dumps({
-                                "role": "assistant",
-                                "content": content,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            })
-                        }
+                        # Check if thought callback is active for this thread
+                        thought_cb = await get_thought_callback(thread_id)
+                        if thought_cb is None:
+                            # No active thought streaming, safe to emit message event
+                            print("event_generator: yielding message event")
+                            yield {
+                                "event": "message",
+                                "data": json.dumps({
+                                    "role": "assistant",
+                                    "content": content,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                })
+                            }
+                        else:
+                            print("event_generator: skipping message event (thought events will stream)")
             # Always update last_message_count to current count
             last_message_count = len(messages)
 
@@ -258,6 +304,29 @@ async def event_generator(
                     current_cost=state.values.get("total_cost", 0.0),
                 )
 
+            # Poll for thought tokens from the callback
+            # Re-check callback each iteration to handle timing issue
+            # (liaison_node registers callback after event_generator starts)
+            thought_callback = await get_thought_callback(thread_id)
+            if thought_callback:
+                try:
+                    # Non-blocking check for available thought tokens
+                    while not thought_callback.queue.empty():
+                        node_name, token = thought_callback.queue.get_nowait()
+                        if token is not None:
+                            # Yield thought event with node name and token
+                            event = format_thought_event(token, channel, node_name)
+                            print(f"[SSE] Yielding thought event: node={node_name}, token_len={len(token)}, event={event}")
+                            yield event
+                        else:
+                            # None token signals callback should be removed
+                            # (either stream ended or replaced by new callback)
+                            await remove_thought_callback(thread_id)
+                            thought_callback = None
+                            break
+                except asyncio.QueueEmpty:
+                    pass
+
             # Periodic cost events
             current_time = time.time()
             if current_time - last_cost_time > 5:
@@ -270,8 +339,8 @@ async def event_generator(
                 yield {"event": "ping", "data": ""}
                 last_ping_time = current_time
 
-            # Small delay before next poll
-            await asyncio.sleep(0.5)
+            # Small delay before next poll (reduced to 0.1s for faster thought streaming)
+            await asyncio.sleep(0.1)
 
         except Exception as e:
             yield {"event": "error", "data": json.dumps({"message": str(e)})}
@@ -343,7 +412,7 @@ async def chat_input(input_data: ChatInput):
             try:
                 # Use a longer timeout for background execution (e.g., 300 seconds)
                 await asyncio.wait_for(
-                    graph.ainvoke(state_model.to_typeddict(), config=config),
+                    graph_ainvoke(graph, state_model.to_typeddict(), config=config),
                     timeout=300.0
                 )
                 print(f"[chat_input] graph.ainvoke completed for thread {thread_id}")

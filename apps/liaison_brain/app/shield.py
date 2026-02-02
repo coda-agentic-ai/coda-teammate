@@ -95,12 +95,13 @@ def scrub_text_for_stream(text: str) -> tuple[str, bool]:
     return scrubber.scrub_with_violation_report(text)
 
 
-def format_thought_event(content: str, channel: str = "WEB_CANVAS") -> dict:
+def format_thought_event(content: str, channel: str = "WEB_CANVAS", node_name: str = "liaison") -> dict:
     """Format a thought chunk for the SSE stream.
 
     Args:
         content: The raw thought content from the LLM.
         channel: The target channel ("WEB_CANVAS" or "SLACK").
+        node_name: The name of the node emitting the thought (e.g., "liaison").
 
     Returns:
         A dict formatted for SSE emission.
@@ -114,11 +115,13 @@ def format_thought_event(content: str, channel: str = "WEB_CANVAS") -> dict:
             "data": json.dumps({"content": scrubbed, "complete": False})
         }
 
-    # Web Canvas gets full JSON with violation flag
+    # Web Canvas gets full JSON with node name and violation flag
     return {
         "event": "thought",
         "data": json.dumps({
+            "node": node_name,
             "content": scrubbed,
+            "cost": 0.0,
             "complete": False,
             "pii_detected": has_violation
         })

@@ -1,6 +1,8 @@
 """LangGraph state machine with MCP tool integration and LLM orchestration."""
 
 from pathlib import Path
+import asyncio
+import threading
 from typing import Any, Literal
 from datetime import datetime, timezone
 
@@ -14,8 +16,15 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from .memory import get_async_saver, get_sync_saver, close_async_saver
 from .state import TeammateState, TeammateStateModel
 from skillhive.persona import SYSTEM_PERSONA
-import asyncio
-import threading
+from .callbacks import (
+    ThoughtStreamCallback,
+    register_thought_callback,
+)
+
+
+# Global lock to serialize ALL graph operations (prevents PostgreSQL "command in progress")
+# This lock must be used by all code that accesses the graph or checkpointer
+_GRAPH_LOCK = asyncio.Lock()
 
 
 # === Settings for LLM Configuration ===
@@ -63,7 +72,7 @@ class CostTrackingCallback(BaseCallbackHandler):
             return
 
         try:
-            from sentry_foundation.economy import UniversalCostTracker
+            from sentry.economy import UniversalCostTracker
 
             # Calculate the cost using litellm
             cost = UniversalCostTracker.calculate_cost(response, self._model_name)
@@ -241,8 +250,31 @@ You are the "Brain" of the teammate, responsible for:
 2. Coordinating with other agents and tools to accomplish goals
 3. Managing task budgets and ensuring efficient resource usage
 
-## Available Tools
-You have access to research tools for market and company data. Use the research tools whenever the user asks for market or company data (e.g., stock prices, company information, financial metrics).
+## Tool Schemas
+You have access to the following tools. Use them by outputting a JSON tool call in the `tool_calls` format.
+
+### fetch_market_data
+Fetch real-time market data for a given stock ticker.
+- Parameters:
+  - ticker (string, required): The stock ticker symbol (e.g., AAPL, GOOGL, MSFT)
+- Example: {"ticker": "AAPL"}
+
+### fetch_contact_info
+Fetch contact information for a role from mock data.
+- Parameters:
+  - role (string, required): The role to fetch contact for (e.g., 'lead_analyst', 'support', 'executive')
+- Example: {"role": "lead_analyst"}
+
+## Thought-Action-Output Pattern
+When you need external data (market data, contacts, etc.):
+1. THINK: Briefly reason about what data you need
+2. ACTION: Output a JSON tool call in the tool_calls format
+3. OUTPUT: Process the tool results and provide your final answer
+
+IMPORTANT: When you need data from tools, you MUST output actual JSON tool_calls in the response, not just describe what you would do. The tool_calls should be in this format:
+```json
+{"name": "tool_name", "parameters": {"param1": "value1"}}
+```
 
 ## Guidelines
 - Always consider the task budget before spawning sub-agents
@@ -290,16 +322,51 @@ async def liaison_node(state: TeammateState) -> TeammateState:
     # Add SystemMessage as the first message for persona behavior
     all_messages = [SystemMessage(content=SYSTEM_PERSONA)] + formatted_messages
 
+    # Get thread_id from state for callback registration
+    thread_id = state.get("task_id", "default")
+
+    # Create thought stream callback for this thread
+    thought_callback = ThoughtStreamCallback(thread_id=thread_id)
+
+    # Register callback before invoke
+    await register_thought_callback(thread_id, thought_callback)
+
+    # Give SSE stream time to detect callback and start polling before we process
+    # This prevents tokens from being added before SSE has a chance to poll them
+    await asyncio.sleep(0.05)
+
     # Invoke the LLM with the FULL message history (including tool calls/results)
-    print(f"liaison_node: invoking LLM with {len(all_messages)} messages")
+    print(f"liaison_node: invoking LLM with {len(all_messages)} messages, thread_id={thread_id}")
     try:
-        response = await llm.ainvoke(all_messages)
+        # Use astream_events to capture both streaming chunks AND get tool_calls
+        response = None
+        async for event in llm.astream_events(all_messages, config={"callbacks": [thought_callback]}):
+            event_type = event.get("event")
+            # Debug: log key events
+            if event_type in ("on_chat_model_start", "on_chat_model_stream", "on_chat_model_end"):
+                data = event.get("data", {})
+                chunk = data.get("chunk")
+                chunk_info = ""
+                if chunk:
+                    has_tc = hasattr(chunk, "tool_calls") and chunk.tool_calls
+                    content = getattr(chunk, "content", None)
+                    chunk_info = f"chunk_tool_calls={bool(has_tc)}, chunk_content={str(content)[:50] if content else 'empty'}"
+                print(f"[liaison_node] EVENT: {event_type}, {chunk_info}")
+            # Capture the final response when streaming ends
+            if event_type == "on_chat_model_end":
+                response = event.get("data", {}).get("output")
+                print(f"[liaison_node] Got response: {type(response).__name__}, tool_calls={getattr(response, 'tool_calls', None)}")
+        if response is None:
+            response = AIMessage(content="Error: No response from LLM")
     except Exception as e:
         print(f"liaison_node: LLM invocation failed: {type(e).__name__}: {e}")
         traceback.print_exc()
         # Return error message as AIMessage instead of crashing
-        error_msg = f"Error processing request: {str(e)}"
-        response = AIMessage(content=error_msg)
+        response = AIMessage(content=f"Error processing request: {str(e)}")
+
+    # Ensure response is set (fallback for edge cases)
+    if response is None:
+        response = AIMessage(content="Error: No response from LLM")
 
     print(f"liaison_node: response type: {type(response).__name__}")
     if hasattr(response, 'content'):
@@ -308,13 +375,19 @@ async def liaison_node(state: TeammateState) -> TeammateState:
     # Add the response to messages
     updated_messages = messages + [response]
 
-    # Check if response contains tool calls
-    has_tool_calls = (
-        hasattr(response, "tool_calls") and response.tool_calls
-    ) or (
-        hasattr(response, "additional_kwargs") and
-        response.additional_kwargs.get("tool_calls")
-    )
+    # Check if response contains tool calls (with debug logging)
+    tool_calls = getattr(response, "tool_calls", None)
+    if not tool_calls:
+        tool_calls = getattr(response, "additional_kwargs", {}).get("tool_calls", [])
+
+    print(f"liaison_node: tool_calls = {tool_calls}")
+    has_tool_calls = bool(tool_calls)
+
+    # Log tool call details if present
+    if has_tool_calls:
+        print(f"liaison_node: DETECTED {len(tool_calls)} tool call(s):")
+        for i, tc in enumerate(tool_calls):
+            print(f"  [{i}] name={tc.get('name')}, id={tc.get('id')}, args={tc.get('args')}")
 
     if has_tool_calls:
         return {
@@ -496,8 +569,11 @@ def should_budget_check(state: TeammateState) -> Literal["liaison_node", "resear
 
     If budget exceeded, route to human_intervention for approval.
     If there are pending tool calls, route to tools_node.
+    If tool results just executed (ToolMessage), loop back to liaison_node for processing.
     Otherwise, continue with normal routing.
     """
+    from langchain_core.messages import ToolMessage
+
     # Check if budget exceeded
     if state.get("requires_approval", False) and not state.get("approval_granted", False):
         return "human_intervention"
@@ -512,6 +588,11 @@ def should_budget_check(state: TeammateState) -> Literal["liaison_node", "resear
                      getattr(last_message, "additional_kwargs", {}).get("tool_calls", [])
         if tool_calls:
             return "tools_node"
+
+        # If tool just executed (ToolMessage), loop back to liaison_node to process results
+        if isinstance(last_message, ToolMessage):
+            print(f"[DEBUG] should_budget_check: tool result detected, routing to liaison_node")
+            return "liaison_node"
     else:
         last_message = None
 
@@ -608,6 +689,9 @@ _checkpointer: Any | None = None
 _graph_lock = asyncio.Lock()
 _graph_sync_lock = threading.Lock()
 
+# Toggle for debugging: set True to use memory checkpointer instead of PostgreSQL
+_USE_MEMORY_CHECKPOINTER = True
+
 
 async def get_graph() -> Any:
     """Get or create the compiled graph (async singleton).
@@ -620,8 +704,14 @@ async def get_graph() -> Any:
         async with _graph_lock:
             # Double-check after acquiring lock
             if _graph is None:
-                # Create checkpointer without context manager (keeps connection alive)
-                _checkpointer = await get_async_saver()
+                if _USE_MEMORY_CHECKPOINTER:
+                    # Use in-memory checkpointer for debugging (no PostgreSQL needed)
+                    from langgraph.checkpoint.memory import MemorySaver
+                    _checkpointer = MemorySaver()
+                    print("Using in-memory checkpointer (debug mode)")
+                else:
+                    # Create checkpointer without context manager (keeps connection alive)
+                    _checkpointer = await get_async_saver()
                 _graph = create_graph(_checkpointer)
     return _graph
 
